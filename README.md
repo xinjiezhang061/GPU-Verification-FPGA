@@ -3,7 +3,8 @@
 Verify a triangle rasterizer, the stage of a GPU that turns a screen-space
 triangle into covered pixels. The project includes a small SystemVerilog DUT, a
 Python oracle, and a self-checking SystemVerilog testbench. It runs in simulation
-without an FPGA board or vendor IP.
+without an FPGA board or vendor IP. The renderer adds a host command stream
+and a depth-tested RGB framebuffer around the same rasterizer.
 
 ## Run
 
@@ -15,19 +16,21 @@ install Icarus with `brew install icarus-verilog`. See the
 ```sh
 make test
 make regression
+make test-renderer
+make render
 make test SEED=2027 RANDOM_COUNT=500 WAVES=1
 ```
 
 - `make test` uses a 32×24 viewport, 24 directed triangles and 200 seeded
   random triangles, plus a reset-abort scenario.
 - `make regression` runs two default-size seeds and exercises 1×1 and 128×128
-  viewports. Set `WIDTH` and `HEIGHT` on `make test` to try another size.
+  viewports, then checks the renderer at 32×24, 9×7 and 1×1. Set `WIDTH` and `HEIGHT` on `make test` to try another size.
 - `make vectors` checks the Python oracle against hand-derived cases and
   generates expected fragments without an HDL simulator.
 - `WAVES=1` writes `build/<WIDTH>x<HEIGHT>/rasterizer.vcd` for waveform debugging.
   Each run overwrites that viewport's vector file and, if enabled, waveform.
 
-## Interface contract
+## Rasterizer interface
 
 | Signal | Contract |
 | --- | --- |
@@ -70,20 +73,66 @@ The regression checks that it observed empty and nonempty cases and at least
 one stalled cycle. Its scoreboard checks pixel coordinates and ordering. Its
 coverage counters describe observed scenarios.
 
-## Project milestones
+## Render a scene
 
-1. **Rasterizer baseline.** Run `make regression` and require every scenario
-   above to pass. Open a VCD for a stalled triangle and follow the command,
-   fragment transfers, and completion.
-2. **Depth and color.** Add constant color and depth to each command and use
-   a small framebuffer model. Compare final contents after overlapping
-   triangles in both draw orders. Specify depth ties, clear values, and write
-   enables before adding randomized sequences.
-3. **FPGA-oriented scan path.** Replace full-viewport scanning with a clipped
-   bounding box and incremental edge updates. Reuse the scoreboard as the
-   equivalence gate, then measure cycles per triangle, DSP use and post-route
-   clock frequency on the chosen FPGA.
+```sh
+make render                               # Render examples/overlap.json
+make render SCENE=path/to/scene.json        # Render a custom scene
+make render WAVES=1                       # Also write renderer.vcd
+```
 
-The delivered implementation covers milestone 1. The full-viewport scan and
-combinational cross products keep the starting RTL readable for waveform
-debugging. FPGA resource usage and timing are future measurements.
+The testbench checks every RGB and depth value against Python and writes the
+simulated hardware's RGB readback to `build/<WIDTH>x<HEIGHT>/frame.ppm`.
+A scene is a JSON array beginning with a clear command. Each command takes a
+six-digit RGB hex string and an unsigned depth from 0 to 65535. Draw commands
+also take three signed 8-bit screen-space vertices as `[x,y]` pairs.
+See [the overlap scene](examples/overlap.json) for a complete input.
+
+## Renderer interface
+
+```mermaid
+flowchart LR
+    Host["Host commands"] --> Control["Clear and draw controller"]
+    Control --> Raster["Triangle rasterizer"]
+    Raster --> Depth["Depth test"]
+    Control --> Frame["RGB and depth framebuffer"]
+    Frame <--> Depth
+    Frame --> Readback["Host pixel readback"]
+```
+
+| Signal | Contract |
+| --- | --- |
+| `cmd_valid`, `cmd_ready` | Both high at a rising edge accept one command. `cmd_draw=0` clears every pixel to the supplied RGB and depth. `cmd_draw=1` draws one flat-color, flat-depth triangle using the supplied vertices. |
+| `cmd_done` | A one-cycle pulse after the last write, including when a triangle produces zero writes. The next command can be accepted in the following cycle. |
+| `read_valid`, `read_ready` | Both high at a rising edge accept the pixel coordinate. Commands have priority. Reads can stream one per cycle while idle. |
+| `pixel_valid`, `pixel_color`, `pixel_depth` | Registered response available after the accepting edge. Out-of-range coordinates return zero RGB and zero depth. The receiver samples each valid response without backpressure. |
+| `rst` | A rising edge with reset high aborts pending work. Issue a clear after reset to initialize the framebuffer before drawing or reading. |
+
+Smaller unsigned depths win. Equal depths preserve the stored pixel, so the
+first draw wins a tie. A clear at depth 65535 accepts draws with depths
+0 through 65534. Color and depth share one memory entry. A fragment fetches
+the old entry in one cycle and conditionally writes the new one in the next.
+
+`make test-renderer` checks draw order, depth ties, zero and maximum depths,
+clear after drawing, mixed clipped and degenerate geometry, command/read
+arbitration, out-of-range reads, and reset during a pending draw. Its
+framebuffer scoreboard compares both depth and color at every pixel.
+
+## Project direction
+
+The [reference GPU](https://github.com/karim4353/gpu-fpga/tree/89007c5) organizes
+a VHDL design around a programmable SIMD pipeline, a memory hierarchy and
+an AXI host interface. It includes host programs that submit work and read
+back results. This project follows the same submission and readback workflow
+with a two-command SystemVerilog raster pipeline and a pixel-by-pixel
+simulation scoreboard.
+
+Two follow-on milestones fit the current command interface:
+
+1. **Textured triangles.** Add texture coordinates, a small texture ROM and
+   nearest-neighbor sampling. Use a checkerboard scene and compare RGB and
+   depth against the reference model.
+2. **FPGA implementation.** Use clipped bounds and incremental edge updates
+   to reduce raster cycles. Reuse the framebuffer scoreboard as an
+   equivalence check, then measure BRAM/DSP usage and post-route clock
+   frequency on the selected FPGA.

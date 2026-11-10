@@ -1,0 +1,6 @@
+[
+  {"op": "clear", "color": "10182A", "depth": 65535},
+  {"op": "draw", "vertices": [[2, 3], [29, 6], [10, 22]], "color": "F58B48", "depth": 300},
+  {"op": "draw", "vertices": [[5, 20], [19, 1], [29, 21]], "color": "39C8C6", "depth": 100},
+  {"op": "draw", "vertices": [[-4, 8], [17, 4], [14, 23]], "color": "A087E6", "depth": 200}
+]
